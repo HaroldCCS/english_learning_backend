@@ -1,0 +1,81 @@
+steps:
+  # Step 1: Construir la imagen Docker
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest'
+      - '-f'
+      - 'Dockerfile'
+      - '.'
+    timeout: '600s'
+
+  # Step 2: Subir la imagen a Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-image'
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}'
+    waitFor: ['build-image']
+
+  # Step 3: Desplegar a Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-cloud-run'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE_NAME}'
+      - '--image'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}'
+      - '--region'
+      - '${_REGION}'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--port'
+      - '${_PORT}'
+      - '--memory'
+      - '${_MEMORY}'
+      - '--cpu'
+      - '${_CPU}'
+      - '--max-instances'
+      - '${_MAX_INSTANCES}'
+      - '--min-instances'
+      - '${_MIN_INSTANCES}'
+
+      - '--set-env-vars'
+      - 'MONGO_URI=${_MONGO_URI},MONGO_DB=${_MONGO_DB},JWT_SECRET=${_JWT_SECRET},HTTP_ADDR=${_HTTP_ADDR}'
+    waitFor: ['push-image']
+
+timeout: '1200s'
+
+options:
+  machineType: 'E2_MEDIUM'
+  logging: CLOUD_LOGGING_ONLY
+
+images:
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest'
+
+
+# Variables de sustitución con valores por defecto
+substitutions:
+  _REGION: ''
+  _REPOSITORY: ''
+  _IMAGE_NAME: ''
+  _SERVICE_NAME: ''
+
+  _MONGO_URI: ''
+  _MONGO_DB: ''
+  _JWT_SECRET: ''
+  _HTTP_ADDR: ':8080'
+
+  _PORT: '8080'
+  _MEMORY: '512Mi'
+  _CPU: '1'
+  _MAX_INSTANCES: '10'
+  _MIN_INSTANCES: '0'
