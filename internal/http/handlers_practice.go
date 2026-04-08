@@ -21,10 +21,12 @@ type practiceMode string
 type practiceDirection string
 
 const (
+	ModeAuto     practiceMode = "auto"
 	ModeMultiple practiceMode = "multiple"
 	ModeWrite    practiceMode = "write"
 	ModeFill     practiceMode = "fill"
 
+	DirAuto practiceDirection = "auto"
 	DirEnEs practiceDirection = "en-es"
 	DirEsEn practiceDirection = "es-en"
 )
@@ -35,12 +37,13 @@ type practiceNextRequest struct {
 }
 
 type practiceItem struct {
-	CardID    string            `json:"cardId"`
-	Mode      practiceMode      `json:"mode"`
-	Direction practiceDirection `json:"direction"`
-	Prompt    string            `json:"prompt"`
-	Masked    string            `json:"masked,omitempty"`
-	Choices   []string          `json:"choices,omitempty"`
+	CardID      string            `json:"cardId"`
+	Mode        practiceMode      `json:"mode"`
+	Direction   practiceDirection `json:"direction"`
+	Prompt      string            `json:"prompt"`
+	Description string            `json:"description,omitempty"`
+	Masked      string            `json:"masked,omitempty"`
+	Choices     []string          `json:"choices,omitempty"`
 }
 
 type practiceAnswerRequest struct {
@@ -54,6 +57,39 @@ type practiceAnswerResponse struct {
 	Correct      bool      `json:"correct"`
 	Box          int       `json:"box"`
 	NextReviewAt time.Time `json:"nextReviewAt"`
+	Expected     string    `json:"expected,omitempty"`
+}
+
+func autoDirectionForBox(box int) practiceDirection {
+	if box <= 2 {
+		if rand.Float64() < 0.8 {
+			return DirEnEs
+		}
+		return DirEsEn
+	}
+	if rand.Float64() < 0.5 {
+		return DirEnEs
+	}
+	return DirEsEn
+}
+
+func autoModeForBox(box int) practiceMode {
+	if box <= 1 {
+		return ModeMultiple
+	}
+	if box <= 3 {
+		if rand.Float64() < 0.6 {
+			return ModeMultiple
+		}
+		return ModeFill
+	}
+	if box <= 5 {
+		if rand.Float64() < 0.5 {
+			return ModeFill
+		}
+		return ModeWrite
+	}
+	return ModeWrite
 }
 
 func (a *API) PracticeNext(w http.ResponseWriter, r *http.Request) {
@@ -66,12 +102,6 @@ func (a *API) PracticeNext(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
-	}
-	if req.Mode == "" {
-		req.Mode = ModeMultiple
-	}
-	if req.Direction == "" {
-		req.Direction = DirEnEs
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -88,24 +118,31 @@ func (a *API) PracticeNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	item := practiceItem{
-		CardID:    card.ID.Hex(),
-		Mode:      req.Mode,
-		Direction: req.Direction,
+	mode := req.Mode
+	if mode == "" || mode == ModeAuto {
+		mode = autoModeForBox(card.Box)
 	}
 
-	prompt, expected := buildPrompt(card, req.Direction)
+	direction := req.Direction
+	if direction == "" || direction == DirAuto {
+		direction = autoDirectionForBox(card.Box)
+	}
+
+	item := practiceItem{CardID: card.ID.Hex(), Mode: mode, Direction: direction}
+	item.Description = strings.TrimSpace(card.Description)
+
+	prompt, expected := buildPrompt(card, direction)
 	item.Prompt = prompt
 
-	if req.Mode == ModeMultiple {
-		choices, err := a.buildChoices(ctx, userID, card.ID, req.Direction, expected)
+	if mode == ModeMultiple {
+		choices, err := a.buildChoices(ctx, userID, card.ID, direction, expected)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to build choices")
 			return
 		}
 		item.Choices = choices
 	}
-	if req.Mode == ModeFill {
+	if mode == ModeFill {
 		item.Masked = maskWord(expected)
 	}
 
@@ -160,12 +197,17 @@ func (a *API) PracticeAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, practiceAnswerResponse{Correct: correct, Box: newBox, NextReviewAt: nextAt})
+	resp := practiceAnswerResponse{Correct: correct, Box: newBox, NextReviewAt: nextAt}
+	if !correct {
+		resp.Expected = expected
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (a *API) pickCard(ctx context.Context, userID primitive.ObjectID, now time.Time) (models.Vocabulary, error) {
+	activeFilter := bson.M{"$or": []bson.M{{"active": bson.M{"$exists": false}}, {"active": true}}}
 	pipelineDue := mongo.Pipeline{
-		bson.D{{Key: "$match", Value: bson.M{"userId": userID, "nextReviewAt": bson.M{"$lte": now}}}},
+		bson.D{{Key: "$match", Value: bson.M{"userId": userID, "nextReviewAt": bson.M{"$lte": now}, "$or": activeFilter["$or"]}}},
 		bson.D{{Key: "$sample", Value: bson.M{"size": 1}}},
 	}
 	cur, err := a.db.Collection("vocabularies").Aggregate(ctx, pipelineDue)
@@ -183,7 +225,7 @@ func (a *API) pickCard(ctx context.Context, userID primitive.ObjectID, now time.
 
 	var v models.Vocabulary
 	err = a.db.Collection("vocabularies").FindOne(ctx,
-		bson.M{"userId": userID},
+		bson.M{"userId": userID, "$or": activeFilter["$or"]},
 		options.FindOne().SetSort(bson.D{{Key: "nextReviewAt", Value: 1}}),
 	).Decode(&v)
 	return v, err
@@ -194,9 +236,10 @@ func (a *API) buildChoices(ctx context.Context, userID, excludeID primitive.Obje
 	if dir == DirEsEn {
 		field = "english"
 	}
+	activeOr := []bson.M{{"active": bson.M{"$exists": false}}, {"active": true}}
 
 	pipeline := mongo.Pipeline{
-		bson.D{{Key: "$match", Value: bson.M{"userId": userID, "_id": bson.M{"$ne": excludeID}}}},
+		bson.D{{Key: "$match", Value: bson.M{"userId": userID, "_id": bson.M{"$ne": excludeID}, "$or": activeOr}}},
 		bson.D{{Key: "$sample", Value: bson.M{"size": 3}}},
 		bson.D{{Key: "$project", Value: bson.M{field: 1}}},
 	}

@@ -18,7 +18,9 @@ type Vocabulary struct {
 	UserID       primitive.ObjectID `bson:"userId" json:"userId"`
 	English      string             `bson:"english" json:"english"`
 	Spanish      string             `bson:"spanish" json:"spanish"`
+	Description  string             `bson:"description,omitempty" json:"description,omitempty"`
 	Category     string             `bson:"category,omitempty" json:"category,omitempty"`
+	Active       *bool              `bson:"active,omitempty" json:"active,omitempty"`
 	Box          int                `bson:"box" json:"box"`
 	NextReviewAt time.Time          `bson:"nextReviewAt" json:"nextReviewAt"`
 	CreatedAt    time.Time          `bson:"createdAt" json:"createdAt"`

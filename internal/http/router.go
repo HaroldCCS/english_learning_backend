@@ -43,6 +43,7 @@ func NewRouter(cfg config.Config, database *mongo.Database) http.Handler {
 			r.Use(authMW.RequireAuth)
 			r.Get("/me", api.Me)
 			r.Post("/vocab", api.QuickAddVocab)
+			r.Put("/vocab/{id}", api.UpdateVocab)
 			r.Get("/vocab/recent", api.RecentVocab)
 			r.Post("/practice/next", api.PracticeNext)
 			r.Post("/practice/answer", api.PracticeAnswer)
